@@ -1,25 +1,10 @@
+// app/api/contracts/[id]/sign/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { connectToDatabase } from '@/lib/mongodb';
 import mongoose from 'mongoose';
-
-// Define the Contract schema if you don't have it already
-const contractSchema = new mongoose.Schema({
-  title: String,
-  content: String,
-  parties: [{
-    name: String,
-    email: String,
-    role: String,
-    signed: { type: Boolean, default: false },
-    signatureData: String,
-    signedAt: String,
-  }],
-  status: { type: String, default: 'draft' },
-  completedAt: String,
-}, { timestamps: true });
-
-// Create or get the model
-const Contract = mongoose.models.Contract || mongoose.model('Contract', contractSchema);
+import Signature from '@/models/Signature';
+import Contract from '@/models/Contract';
+import { sendCompletedContract } from '@/lib/email';
 
 export async function POST(
   request: NextRequest,
@@ -79,32 +64,66 @@ export async function POST(
       );
     }
 
-    // Update the party's signed status and add signature data
+    // Create signature record
+    const signatureRecord = await Signature.create({
+      contractId: contract._id,
+      partyEmail: partyEmail,
+      signatureData: signature,
+      ipAddress: request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || null,
+      timestamp: new Date(timestamp),
+    });
+
+    // Update the party's signed status and add signature reference
     contract.parties[partyIndex].signed = true;
-    contract.parties[partyIndex].signatureData = signature;
-    contract.parties[partyIndex].signedAt = timestamp;
+    contract.parties[partyIndex].signatureId = signatureRecord._id;
+    contract.parties[partyIndex].signedAt = new Date(timestamp);
+    contract.parties[partyIndex].signatureData = signature; // Store signature image data
 
     // Check if all parties have signed
     const allSigned = contract.parties.every((party: any) => party.signed);
 
-    // If all parties have signed, update the contract status
+    // If all parties have signed, update the contract status and send completion emails
     if (allSigned) {
       contract.status = 'completed';
-      contract.completedAt = new Date().toISOString();
-    }
+      
+      // Save the contract first
+      await contract.save();
 
-    // Save the updated contract
-    await contract.save();
+      // Get base URL for email links
+      const protocol = request.headers.get('x-forwarded-proto') || 'http';
+      const host = request.headers.get('host') || 'localhost:3000';
+      const baseUrl = `${protocol}://${host}`;
+
+      // Send completion emails to all parties
+      try {
+        await sendCompletedContract({
+          contractId: contract._id,
+          contractTitle: contract.title,
+          parties: contract.parties.map((p: any) => ({
+            name: p.name,
+            email: p.email,
+            role: p.role,
+          })),
+          baseUrl,
+        });
+      } catch (emailError) {
+        console.error('Error sending completion emails:', emailError);
+        // Don't fail the signature process if email fails
+      }
+    } else {
+      // Just save the contract with the new signature
+      await contract.save();
+    }
 
     return NextResponse.json({
       success: true,
       message: 'Contract signed successfully',
-      allPartiesSigned: allSigned
+      allPartiesSigned: allSigned,
+      signatureId: signatureRecord._id.toString(),
     });
 
   } catch (error) {
     console.error('Error signing contract:', error);
-    // Log the actual error message for debugging
     console.error('Full error details:', {
       message: error instanceof Error ? error.message : 'Unknown error',
       stack: error instanceof Error ? error.stack : 'No stack trace',

@@ -27,3 +27,82 @@ body {
     @apply text-black;
   }
 }
+
+/* Add this to your global.css or create a new print.css file */
+
+@media print {
+  /* Hide navigation and non-essential elements */
+  nav,
+  .no-print,
+  button,
+  a[href^="/dashboard"],
+  .bg-blue-50,
+  .bg-yellow-50,
+  .shadow-md {
+    display: none !important;
+  }
+
+  /* Reset backgrounds and colors for print */
+  body {
+    background: white !important;
+    color: black !important;
+  }
+
+  /* Contract styling for print */
+  .contract-content {
+    background: white !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  /* Ensure signatures are visible */
+  .signature-section {
+    page-break-inside: avoid;
+    margin-top: 50px;
+  }
+
+  .signature-image {
+    max-height: 80px;
+    width: auto;
+  }
+
+  /* Adjust text colors for print */
+  h1, h2, h3, h4, h5, h6, p, span, div {
+    color: black !important;
+    opacity: 1 !important;
+  }
+
+  /* Ensure contract text is readable */
+  .prose {
+    color: black !important;
+    max-width: none !important;
+  }
+
+  /* Page margins */
+  @page {
+    margin: 1in;
+  }
+
+  /* Signature grid for print */
+  .signature-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 2rem;
+    margin-top: 3rem;
+  }
+
+  /* Individual signature blocks */
+  .signature-block {
+    border-bottom: 2px solid #333;
+    padding-bottom: 0.5rem;
+    min-height: 60px;
+  }
+
+  /* Party information under signatures */
+  .party-info {
+    margin-top: 0.5rem;
+    font-size: 0.875rem;
+  }
+}

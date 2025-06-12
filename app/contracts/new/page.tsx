@@ -4,6 +4,8 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 
+
+
 export default function NewContractPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
@@ -34,7 +36,7 @@ export default function NewContractPage() {
     setLoading(true);
 
     try {
-      const response = await fetch("/api/contracts/generate-from-prompt", {
+      const response = await fetch("/api/contracts/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -45,7 +47,7 @@ export default function NewContractPage() {
 
       if (response.ok) {
         const { contract } = await response.json();
-        router.push(`/contracts/${contract._id}`);
+        router.push(`/contracts/${contract.id}`);
       } else {
         const error = await response.json();
         alert(error.message || "Failed to generate contract");

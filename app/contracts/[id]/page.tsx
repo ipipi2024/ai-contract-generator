@@ -1,30 +1,35 @@
-'use client';
+// app/contracts/[id]/page.tsx (Main page component)
+"use client";
 
-import { useEffect, useState } from 'react';
-import { useParams } from 'next/navigation';
-import Link from 'next/link';
-
-interface Contract {
-  _id: string;
-  title: string;
-  content: string;
-  parties: Array<{
-    name: string;
-    email: string;
-    role: string;
-    signed: boolean;
-  }>;
-  status: string;
-}
+import { useEffect, useState } from "react";
+import { useParams } from "next/navigation";
+import { useSession } from "next-auth/react";
+import { Contract, Party } from "@/types/contract";
+import { generateContractPDF } from "@/utils/contractPdfGenerator";
+import { ContractHeader } from "@/components/contract/ContractHeader";
+import { ContractContent } from "@/components/contract/ContractContent";
+import { SignatureStatus } from "@/components/contract/SignatureStatus";
+import { EmailModal } from "@/components/contract/EmailModal";
+import { EmailInputModal } from "@/components/contract/EmailInputModal";
 
 export default function ContractPage() {
   const params = useParams();
+  const { data: session } = useSession();
   const [contract, setContract] = useState<Contract | null>(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [editedTitle, setEditedTitle] = useState('');
-  const [editedContent, setEditedContent] = useState('');
+  const [editedTitle, setEditedTitle] = useState("");
+  const [editedContent, setEditedContent] = useState("");
+  const [sendingEmail, setSendingEmail] = useState(false);
+  const [emailModalOpen, setEmailModalOpen] = useState(false);
+  const [selectedParty, setSelectedParty] = useState<string | null>(null);
+  const [emailInputModalOpen, setEmailInputModalOpen] = useState(false);
+  const [selectedPartyForEmail, setSelectedPartyForEmail] =
+    useState<Party | null>(null);
+  const [emailInput, setEmailInput] = useState("");
+  const [updatingEmail, setUpdatingEmail] = useState(false);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
 
   useEffect(() => {
     fetchContract();
@@ -45,21 +50,24 @@ export default function ContractPage() {
         setContract(data.contract);
       }
     } catch (error) {
-      console.error('Error fetching contract:', error);
+      console.error("Error fetching contract:", error);
     } finally {
       setLoading(false);
     }
   };
+
+  // Replace the handleSave function in app/contracts/[id]/page.tsx
 
   const handleSave = async () => {
     if (!contract) return;
 
     setSaving(true);
     try {
+      // First, save the content changes
       const response = await fetch(`/api/contracts/${params.id}`, {
-        method: 'PUT',
+        method: "PUT",
         headers: {
-          'Content-Type': 'application/json',
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
           title: editedTitle,
@@ -67,23 +75,85 @@ export default function ContractPage() {
         }),
       });
 
-      if (response.ok) {
-        // Update the local state
+      if (!response.ok) {
+        const errorData = await response.json();
+        alert(`Failed to save changes: ${errorData.error || "Unknown error"}`);
+        return;
+      }
+
+      // Then, re-extract requirements from the edited content
+      const reextractResponse = await fetch(
+        `/api/contracts/${params.id}/reextract`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            editedTitle,
+            editedContent,
+          }),
+        }
+      );
+
+      if (reextractResponse.ok) {
+        const {
+          contract: updatedContract,
+          changes,
+          confidence,
+        } = await reextractResponse.json();
+
+        // Update local state with the re-extracted contract
+        setContract(updatedContract);
+
+        // Show change summary if significant changes detected
+        if (
+          changes &&
+          (changes.added.length > 0 || changes.modified.length > 0)
+        ) {
+          showChangesSummary(changes, confidence);
+        }
+      } else {
+        // If re-extraction fails, still update with saved content
         setContract({
           ...contract,
           title: editedTitle,
           content: editedContent,
         });
-        setEditing(false);
-      } else {
-        const errorData = await response.json();
-        alert(`Failed to save changes: ${errorData.error || 'Unknown error'}`);
+
+        console.error("Re-extraction failed, but content was saved");
       }
+
+      setEditing(false);
     } catch (error) {
-      console.error('Error saving contract:', error);
-      alert('An error occurred while saving. Please try again.');
+      console.error("Error saving contract:", error);
+      alert("An error occurred while saving. Please try again.");
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Add this helper function to show changes summary
+  const showChangesSummary = (changes: any, confidence: number) => {
+    const summaryItems = [];
+
+    if (changes.added.length > 0) {
+      summaryItems.push(`Added: ${changes.added.join(", ")}`);
+    }
+    if (changes.modified.length > 0) {
+      summaryItems.push(`Modified: ${changes.modified.join(", ")}`);
+    }
+    if (changes.removed.length > 0) {
+      summaryItems.push(`Removed: ${changes.removed.join(", ")}`);
+    }
+
+    if (summaryItems.length > 0) {
+      // You can replace this with a proper toast notification
+      alert(
+        `Contract requirements updated (${Math.round(
+          confidence * 100
+        )}% confidence):\n\n${summaryItems.join("\n")}`
+      );
     }
   };
 
@@ -95,74 +165,195 @@ export default function ContractPage() {
     setEditing(false);
   };
 
-  const canEdit = contract && contract.status !== 'completed';
-  const hasSignatures = contract?.parties.some(party => party.signed);
+  const handleSendSignatureRequest = async (
+    partyEmail: string | null = null
+  ) => {
+    if (!contract) return;
+
+    setSendingEmail(true);
+    try {
+      const response = await fetch(
+        `/api/contracts/${params.id}/send-signature-request`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            partyEmail: partyEmail,
+            sendToAll: !partyEmail,
+          }),
+        }
+      );
+
+      if (response.ok) {
+        const data = await response.json();
+        alert(`Signature request${partyEmail ? "" : "s"} sent successfully!`);
+
+        if (data.contractStatus !== contract.status) {
+          setContract({ ...contract, status: data.contractStatus });
+        }
+      } else {
+        const errorData = await response.json();
+        alert(`Failed to send: ${errorData.error || "Unknown error"}`);
+      }
+    } catch (error) {
+      console.error("Error sending signature request:", error);
+      alert("An error occurred while sending. Please try again.");
+    } finally {
+      setSendingEmail(false);
+      setEmailModalOpen(false);
+      setSelectedParty(null);
+    }
+  };
+
+  const handleUpdatePartyEmail = async () => {
+    if (!contract || !selectedPartyForEmail || !emailInput) return;
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(emailInput)) {
+      alert("Please enter a valid email address");
+      return;
+    }
+
+    setUpdatingEmail(true);
+    try {
+      const response = await fetch(
+        `/api/contracts/${params.id}/update-party-email`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            partyName: selectedPartyForEmail.name,
+            newEmail: emailInput,
+          }),
+        }
+      );
+
+      if (response.ok) {
+        const updatedParties = contract.parties.map((party) =>
+          party.name === selectedPartyForEmail.name
+            ? { ...party, email: emailInput }
+            : party
+        );
+        setContract({ ...contract, parties: updatedParties });
+
+        setEmailInputModalOpen(false);
+        setEmailInput("");
+
+        openEmailModal(emailInput);
+      } else {
+        const errorData = await response.json();
+        alert(`Failed to update email: ${errorData.error || "Unknown error"}`);
+      }
+    } catch (error) {
+      console.error("Error updating party email:", error);
+      alert("An error occurred while updating email. Please try again.");
+    } finally {
+      setUpdatingEmail(false);
+    }
+  };
+
+  const openEmailModal = (partyEmail: string | null = null) => {
+    setSelectedParty(partyEmail);
+    setEmailModalOpen(true);
+  };
+
+  const handleEmailButtonClick = (party: Party) => {
+    const emailIsEmpty = !party.email || party.email.toString().trim() === "";
+
+    if (emailIsEmpty) {
+      setSelectedPartyForEmail(party);
+      setEmailInput("");
+      setEmailInputModalOpen(true);
+    } else {
+      openEmailModal(party.email);
+    }
+  };
+
+  const copySignatureLink = (party: Party) => {
+    if (!party.email || party.email.trim() === "") {
+      alert("Please add an email address for this party first");
+      return;
+    }
+    const link = `${window.location.origin}/contracts/sign/${
+      contract?._id
+    }?email=${encodeURIComponent(party.email)}`;
+    navigator.clipboard.writeText(link);
+    alert("Signature link copied to clipboard!");
+  };
+
+  const downloadPDF = async () => {
+    if (!contract) return;
+
+    setDownloadingPdf(true);
+    try {
+      await generateContractPDF(contract);
+    } catch (error) {
+      console.error("Error generating PDF:", error);
+      alert("Failed to generate PDF. Please try again.");
+    } finally {
+      setDownloadingPdf(false);
+    }
+  };
+
+  const canEdit =
+    contract &&
+    contract.status !== "completed" &&
+    session?.user?.id === contract.userId;
+  const hasSignatures =
+    contract?.parties.some((party) => party.signed) ?? false;
+  const unsignedParties =
+    contract?.parties.filter((party) => !party.signed) || [];
+  const unsignedPartiesWithEmail = unsignedParties.filter(
+    (party) => party.email && party.email.trim() !== ""
+  );
+  const isOwner = !!(contract && session?.user?.id === contract.userId);
 
   if (loading) return <div className="p-8">Loading...</div>;
   if (!contract) return <div className="p-8">Contract not found</div>;
 
   return (
-    <div className="min-h-screen" style={{ backgroundColor: 'var(--background)' }}>
+    <div
+      className="min-h-screen"
+      style={{ backgroundColor: "var(--background)" }}
+    >
       <div className="max-w-4xl mx-auto p-8">
-        {/* Back link */}
-        <Link 
-          href="/dashboard" 
-          className="text-blue-600 hover:text-blue-800 mb-6 inline-block"
-        >
-          ← Back to Dashboard
-        </Link>
-
-        {/* Header */}
-        <div className="mb-6 flex justify-between items-center">
-          {editing ? (
-            <input
-              type="text"
-              value={editedTitle}
-              onChange={(e) => setEditedTitle(e.target.value)}
-              className="text-3xl font-bold bg-transparent border-b-2 border-blue-500 outline-none flex-1 mr-4"
-              style={{ color: 'var(--foreground)' }}
-              placeholder="Contract Title"
-            />
-          ) : (
-            <h1 className="text-3xl font-bold" style={{ color: 'var(--foreground)' }}>
-              {contract.title}
-            </h1>
-          )}
-          
-          <div className="flex items-center gap-3">
-            <span className={`px-3 py-1 rounded-full text-sm ${
-              contract.status === 'completed' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
-              contract.status === 'pending' ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200' :
-              'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200'
-            }`}>
-              {contract.status}
-            </span>
-            
-            {canEdit && !editing && (
-              <button
-                onClick={() => setEditing(true)}
-                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors font-medium"
-                disabled={hasSignatures}
-                title={hasSignatures ? "Cannot edit contract with existing signatures" : "Edit contract"}
-              >
-                Edit
-              </button>
-            )}
-          </div>
-        </div>
+        <ContractHeader
+          contract={contract}
+          session={session}
+          editing={editing}
+          editedTitle={editedTitle}
+          hasSignatures={hasSignatures}
+          downloadingPdf={downloadingPdf}
+          onTitleChange={setEditedTitle}
+          onEditClick={() => setEditing(true)}
+          onDownloadPDF={downloadPDF}
+        />
 
         {/* Warning for contracts with signatures */}
         {hasSignatures && canEdit && (
           <div className="mb-6 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-md p-4">
             <div className="flex">
               <div className="flex-shrink-0">
-                <svg className="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                <svg
+                  className="h-5 w-5 text-yellow-400"
+                  viewBox="0 0 20 20"
+                  fill="currentColor"
+                >
+                  <path
+                    fillRule="evenodd"
+                    d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z"
+                    clipRule="evenodd"
+                  />
                 </svg>
               </div>
               <div className="ml-3">
                 <p className="text-sm text-yellow-800 dark:text-yellow-200">
-                  This contract has existing signatures and cannot be edited. Create a new version if changes are needed.
+                  This contract has existing signatures and cannot be edited.
+                  Create a new version if changes are needed.
                 </p>
               </div>
             </div>
@@ -177,11 +368,11 @@ export default function ContractPage() {
               disabled={saving}
               className={`px-6 py-2 rounded-md font-medium transition-colors ${
                 saving
-                  ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                  : 'bg-green-600 text-white hover:bg-green-700'
+                  ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                  : "bg-green-600 text-white hover:bg-green-700"
               }`}
             >
-              {saving ? 'Saving...' : 'Save Changes'}
+              {saving ? "Saving..." : "Save Changes"}
             </button>
             <button
               onClick={handleCancel}
@@ -193,112 +384,121 @@ export default function ContractPage() {
           </div>
         )}
 
-        {/* Contract Content */}
-        <div 
-          className="shadow-md rounded-lg p-8 mb-6"
-          style={{ 
-            backgroundColor: 'var(--background)',
-            border: '1px solid rgba(128, 128, 128, 0.2)',
-            color: 'var(--foreground)'
-          }}
-        >
-          {editing ? (
-            <div>
-              <label className="block text-sm font-medium mb-2" style={{ color: 'var(--foreground)' }}>
-                Contract Content:
-              </label>
-              <textarea
-                value={editedContent}
-                onChange={(e) => setEditedContent(e.target.value)}
-                className="w-full h-96 p-4 border rounded-md resize-none"
-                style={{ 
-                  backgroundColor: 'var(--background)',
-                  color: 'var(--foreground)',
-                  border: '1px solid rgba(128, 128, 128, 0.3)'
-                }}
-                placeholder="Enter contract content..."
-              />
-              <p className="text-sm text-gray-500 mt-2">
-                Use line breaks for paragraphs. HTML tags are not supported in edit mode.
-              </p>
-            </div>
-          ) : (
-            <div className="prose max-w-none" style={{ color: 'inherit' }}>
-              <div 
-                dangerouslySetInnerHTML={{ __html: contract.content.replace(/\n/g, '<br />') }}
-                style={{ color: 'var(--foreground)' }}
-              />
+        <ContractContent
+          contract={contract}
+          editing={editing}
+          editedContent={editedContent}
+          onContentChange={setEditedContent}
+        />
+
+        {/* Email Actions for Owner */}
+        {isOwner &&
+          unsignedParties.length > 0 &&
+          contract.status !== "completed" && (
+            <div className="mb-6 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md p-4">
+              <h3 className="font-semibold mb-3 text-blue-900 dark:text-blue-100">
+                Send Signature Requests
+              </h3>
+              {unsignedPartiesWithEmail.length === 0 ? (
+                <p className="text-sm text-blue-800 dark:text-blue-200 mb-3">
+                  Please add email addresses for the parties below before
+                  sending signature requests.
+                </p>
+              ) : (
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => openEmailModal(null)}
+                    disabled={
+                      sendingEmail || unsignedPartiesWithEmail.length === 0
+                    }
+                    className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {sendingEmail
+                      ? "Sending..."
+                      : `Email ${unsignedPartiesWithEmail.length} Part${
+                          unsignedPartiesWithEmail.length > 1 ? "ies" : "y"
+                        } with Email`}
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (unsignedPartiesWithEmail.length === 1) {
+                        copySignatureLink(unsignedPartiesWithEmail[0]);
+                      } else {
+                        alert(
+                          "Please use individual copy buttons for multiple parties"
+                        );
+                      }
+                    }}
+                    disabled={unsignedPartiesWithEmail.length === 0}
+                    className="px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-md hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Copy Signature Link
+                  </button>
+                </div>
+              )}
             </div>
           )}
-        </div>
 
-        {/* Signature Status */}
-        <div 
-          className="rounded-lg p-6"
-          style={{ 
-            backgroundColor: 'rgba(128, 128, 128, 0.1)',
-            border: '1px solid rgba(128, 128, 128, 0.1)'
-          }}
-        >
-          <h2 className="text-lg font-semibold mb-4" style={{ color: 'var(--foreground)' }}>
-            Signature Status
-          </h2>
-          <div className="space-y-3">
-            {contract.parties.map((party, index) => (
-              <div key={index} className="flex justify-between items-center">
-                <div>
-                  <p className="font-medium" style={{ color: 'var(--foreground)' }}>
-                    {party.name}
-                  </p>
-                  <p 
-                    className="text-sm"
-                    style={{ 
-                      color: 'var(--foreground)',
-                      opacity: 0.7 
-                    }}
-                  >
-                    {party.role} - {party.email}
-                  </p>
-                </div>
-                {party.signed ? (
-                  <span className="text-green-600 dark:text-green-400 flex items-center">
-                    <svg className="w-5 h-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                    </svg>
-                    Signed
-                  </span>
-                ) : (
-                  <Link
-                    href={`/contracts/sign/${contract._id}?party=${party.email}`}
-                    className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors font-medium"
-                  >
-                    Sign Document
-                  </Link>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
+        <SignatureStatus
+          contract={contract}
+          isOwner={isOwner}
+          sendingEmail={sendingEmail}
+          onCopyLink={copySignatureLink}
+          onEmailClick={handleEmailButtonClick}
+        />
 
         {/* Info Box */}
         <div className="mt-6 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md p-4">
           <div className="flex">
             <div className="flex-shrink-0">
-              <svg className="h-5 w-5 text-blue-400" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+              <svg
+                className="h-5 w-5 text-blue-400"
+                viewBox="0 0 20 20"
+                fill="currentColor"
+              >
+                <path
+                  fillRule="evenodd"
+                  d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                  clipRule="evenodd"
+                />
               </svg>
             </div>
             <div className="ml-3 flex-1">
               <p className="text-sm text-blue-800 dark:text-blue-200">
-                {editing 
+                {editing
                   ? "You are currently editing this contract. Save your changes or cancel to exit edit mode."
-                  : "All parties must sign this contract for it to be marked as completed. Each party will receive a copy once all signatures are collected."
-                }
+                  : "All parties must sign this contract for it to be marked as completed. Each party will receive a copy once all signatures are collected."}
               </p>
             </div>
           </div>
         </div>
       </div>
+
+      <EmailInputModal
+        isOpen={emailInputModalOpen}
+        selectedParty={selectedPartyForEmail}
+        emailInput={emailInput}
+        updatingEmail={updatingEmail}
+        onEmailChange={setEmailInput}
+        onClose={() => {
+          setEmailInputModalOpen(false);
+          setSelectedPartyForEmail(null);
+          setEmailInput("");
+        }}
+        onSave={handleUpdatePartyEmail}
+      />
+
+      <EmailModal
+        isOpen={emailModalOpen}
+        selectedParty={selectedParty}
+        unsignedPartiesWithEmail={unsignedPartiesWithEmail}
+        sendingEmail={sendingEmail}
+        onClose={() => {
+          setEmailModalOpen(false);
+          setSelectedParty(null);
+        }}
+        onSend={() => handleSendSignatureRequest(selectedParty)}
+      />
     </div>
   );
 }
